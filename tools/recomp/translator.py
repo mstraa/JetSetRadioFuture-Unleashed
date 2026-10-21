@@ -1474,6 +1474,11 @@ class BatchTranslator:
         # translated chunks.
         defined = {name for _, name, _ in translations}
         defined |= set(manual_decls.values())   # hand-written, but defined
+        # Wrapped by hand: the body is emitted as sub_X_gen and calls go to the
+        # wrapper sub_X, which recomp_manual.c defines (lifter._call_target_name).
+        wrappers = {a: f"sub_{a:08X}" for a, n, _ in translations
+                    if n == f"sub_{a:08X}_gen"}
+        defined |= set(wrappers.values())
         unresolved = {
             addr: name
             for addr, name in self.translator.lifter.referenced_calls.items()
@@ -1508,6 +1513,12 @@ class BatchTranslator:
         for addr, name, _ in translations:
             decl = self._make_declaration(addr, name)
             header_lines.append(f"{decl};")
+
+        if wrappers:
+            header_lines.append("")
+            header_lines.append("/* Hand-written wrappers around the sub_X_gen bodies above */")
+            for addr in sorted(wrappers):
+                header_lines.append(f"void {wrappers[addr]}(void);  /* 0x{addr:08X} */")
 
         if manual_decls:
             header_lines.append("")

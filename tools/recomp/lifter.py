@@ -1039,6 +1039,12 @@ class Lifter:
         """
         if addr in self.func_db:
             name = self.func_db[addr].get("name", f"sub_{addr:08X}")
+            # A function the manual file wraps is *defined* as sub_X_gen, but
+            # a call goes to the wrapper, sub_X: calling the body directly
+            # skipped JSRF's DirectSound doorbell fix (sub_001A1769) and the
+            # audio thread spun for ever.
+            if name == f"sub_{addr:08X}_gen":
+                name = f"sub_{addr:08X}"
         elif addr in self.label_db:
             name = self.label_db[addr]
         else:
