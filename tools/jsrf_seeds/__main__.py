@@ -111,18 +111,30 @@ def main():
     json.dump([{"start": f"0x{v:08X}", "why": seeds.get(v, "earlier pass")} for v in allseeds],
               open(a.out, "w"), indent=1)
 
+    # The generated dispatch table maps a wrapped function's address to its
+    # body, sub_X_gen, so an indirect call skipped the wrapper (the spin
+    # thread, 0x0013B180, ran the guest's busy loop and held the lock for
+    # ever). recomp_lookup_manual() asks g_recomp_holes before that table:
+    # list every wrapper there.
+    from tools.recomp.manual_scan import scan as scan_manual
+    skip, wrap, _ = scan_manual(a.manual)
+    wrapped = sorted(wrap & skip)
     tables = os.path.join(a.gen_dir, "recomp_jsrf_tables.c")
     os.makedirs(a.gen_dir, exist_ok=True)
     with open(tables, "w") as f:
-        f.write("/* Written by tools.jsrf_seeds: the functions these tables listed in the\n"
-                " * release are lifted as ordinary functions here (seeded), so they are\n"
-                " * found through the generated dispatch table and these stay empty. */\n"
+        f.write("/* Written by tools.jsrf_seeds. The seeded functions are lifted as\n"
+                " * ordinary functions here, so g_recomp_seeded stays empty; g_recomp_holes\n"
+                " * routes indirect calls to the hand-written wrappers in recomp_manual.c\n"
+                " * rather than to the sub_X_gen bodies the dispatch table names. */\n"
                 "#include <stdint.h>\n"
-                "typedef void (*jsrf_fn_t)(void);\n"
-                "const struct { uint32_t va; jsrf_fn_t fn; } g_recomp_seeded[1] = { { 0, 0 } };\n"
+                "typedef void (*jsrf_fn_t)(void);\n")
+        for v in wrapped:
+            f.write(f"extern void sub_{v:08X}(void);\n")
+        f.write("const struct { uint32_t va; jsrf_fn_t fn; } g_recomp_seeded[1] = { { 0, 0 } };\n"
                 "const unsigned g_recomp_seeded_count = 0;\n"
-                "const struct { uint32_t va; jsrf_fn_t fn; } g_recomp_holes[1] = { { 0, 0 } };\n"
-                "const unsigned g_recomp_holes_count = 0;\n")
+                f"const struct {{ uint32_t va; jsrf_fn_t fn; }} g_recomp_holes[{max(1, len(wrapped))}] = {{\n")
+        f.write("".join(f"    {{ 0x{v:08X}u, sub_{v:08X} }},\n" for v in wrapped) or "    { 0, 0 },\n")
+        f.write(f"}};\nconst unsigned g_recomp_holes_count = {len(wrapped)};\n")
 
     new = sorted(set(seeds) - old)
     by = {}
