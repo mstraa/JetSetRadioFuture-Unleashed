@@ -28,6 +28,7 @@ import struct
 import sys
 
 from tools.abi_analysis.xbe_min import XbeFile
+from tools.disasm.loader import DATA_SECTION_NAMES
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -46,8 +47,14 @@ def main():
     a = ap.parse_args()
 
     xbe = XbeFile(a.xbe)
-    text = next(s for s in xbe.sections if s.name == ".text")
-    t0, t1 = text.virtual_address, text.virtual_address + text.virtual_size
+    # What tools.disasm takes for code without --text-only (loader.py):
+    # the release lifts the library sections (D3D, DSOUND, XPP, ...) too.
+    code = [s for s in xbe.sections
+            if (s.flags & 0x4) and s.raw_size > 0 and s.name not in DATA_SECTION_NAMES]
+    datas = [s for s in xbe.sections if s.name in DATA_SECTION_NAMES and s.raw_size >= 4]
+
+    def in_code(va):
+        return any(s.contains_va(va) for s in code)
 
     funcs = json.load(open(a.functions))
     starts = sorted(int(f["start"], 16) for f in funcs)
@@ -73,26 +80,12 @@ def main():
 
     seeds = {}
 
-    # 1. what recomp_manual.c wraps as sub_X_gen. Some live in the library
-    # sections after .text (D3D's, ...): those sections are named in
-    # extra_sections.txt for the next pass's --extra-sections.
-    extra_path = os.path.join(os.path.dirname(a.out), "extra_sections.txt")
-    extra = set()
-    if os.path.exists(extra_path):
-        extra = {l.strip() for l in open(extra_path) if l.strip()}
+    # 1. what recomp_manual.c wraps as sub_X_gen
     src = open(a.manual, encoding="utf-8", errors="replace").read()
     for m in re.finditer(r"^extern void sub_([0-9A-Fa-f]{8})_gen\(void\);", src, re.M):
         va = int(m.group(1), 16)
-        sec = xbe.find_section(va)
-        if va in known or sec is None:
-            continue
-        seeds[va] = "wrapped"
-        if sec is not text:
-            extra.add(sec.name)
-    code = [text] + [s for s in xbe.sections if s.name in extra and s is not text]
-
-    def in_code(va):
-        return any(s.contains_va(va) for s in code)
+        if va not in known and in_code(va):
+            seeds[va] = "wrapped"
 
     # 2. direct-call targets left as stubs that sit in a gap
     stub = os.path.join(a.gen_dir, "recomp_stubs_unresolved.c")
@@ -102,16 +95,14 @@ def main():
             if in_code(va) and va not in known and not in_function(va) and plausible(va):
                 seeds.setdefault(va, "hole")
 
-    # 3. pointers into .text from the data sections that start nothing yet
-    for s in xbe.sections:
-        if s is text or s.raw_size < 4 or (s.flags & 0x4):   # skip executable sections
-            continue
+    # 3. pointers into code from the data sections that start nothing yet
+    for s in datas:
         data = xbe.data[s.raw_address:s.raw_address + s.raw_size]
         ptrs = [struct.unpack_from("<I", data, o)[0] for o in range(0, len(data) - 3, 4)]
         for i, va in enumerate(ptrs):
-            if not (t0 <= va < t1) or va in known or in_function(va) or not plausible(va):
+            if not in_code(va) or va in known or in_function(va) or not plausible(va):
                 continue
-            run = (i > 0 and t0 <= ptrs[i - 1] < t1) or (i + 1 < len(ptrs) and t0 <= ptrs[i + 1] < t1)
+            run = (i > 0 and in_code(ptrs[i - 1])) or (i + 1 < len(ptrs) and in_code(ptrs[i + 1]))
             if run or code_at(va).startswith(PROLOGUES):
                 seeds.setdefault(va, "data")
 
@@ -119,9 +110,6 @@ def main():
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     json.dump([{"start": f"0x{v:08X}", "why": seeds.get(v, "earlier pass")} for v in allseeds],
               open(a.out, "w"), indent=1)
-
-    with open(extra_path, "w") as f:
-        f.write("".join(n + "\n" for n in sorted(extra)))
 
     tables = os.path.join(a.gen_dir, "recomp_jsrf_tables.c")
     os.makedirs(a.gen_dir, exist_ok=True)
@@ -142,8 +130,6 @@ def main():
         by[seeds[v]] = by.get(seeds[v], 0) + 1
     print(f"jsrf_seeds: {len(new)} new ({', '.join(f'{k} {n}' for k, n in sorted(by.items())) or 'none'}),"
           f" {len(allseeds)} in all -> {a.out}")
-    if extra:
-        print(f"jsrf_seeds: also disassembling {', '.join(sorted(extra))}")
     print(f"NEW={len(new)}")
 
 

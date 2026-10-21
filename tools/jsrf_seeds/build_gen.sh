@@ -9,15 +9,15 @@ cd "$(dirname "$0")/../.."
 PY=${PYTHON:-python3}
 SEEDS=tools/jsrf_seeds/output/seeds.json
 ANALYSIS="$(dirname "$XBE")/$(basename "$XBE" .xbe)_analysis.json"
-EXTRA_FILE=tools/jsrf_seeds/output/extra_sections.txt
-rm -f "$SEEDS" "$EXTRA_FILE"
+rm -f "$SEEDS"
 [ -f "$ANALYSIS" ] || $PY -m tools.xbe_parser "$XBE" --json "$ANALYSIS"
 pass=1
 while :; do
     echo "=== pass $pass ==="
-    set -- --text-only --force
+    # Every code section, not only .text: the release lifts D3D's and the
+    # other libraries' functions too, and the game calls them indirectly.
+    set -- --force
     [ -f "$SEEDS" ] && set -- "$@" --seed-functions "$SEEDS"
-    [ -s "$EXTRA_FILE" ] && set -- "$@" --extra-sections "$(paste -sd, "$EXTRA_FILE")"
     $PY -m tools.disasm "$XBE" "$@"
     $PY -m tools.func_id "$XBE"
     $PY -m tools.abi_analysis "$XBE"
