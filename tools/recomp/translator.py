@@ -394,7 +394,17 @@ class FunctionTranslator:
                     addr for addr in weak_starts[weak_index:]
                     if addr < upper and addr in cfg_targets
                 }
-                if not owned:
+                # No weak seed to absorb is not a reason to give up: when a
+                # bogus start (an immediate that happens to fall mid-
+                # instruction) cut the function short, its switch arms past
+                # the cut are not seeds at all, and without the recovered CFG
+                # the indexed jump lands on an address nothing lifted. JSRF's
+                # sub_001060B0 (table 0x106350) took the game down that way
+                # when gameplay loaded.
+                reaches_past = any(
+                    t >= original_end
+                    for targets in jump_tables.values() for t in targets)
+                if not owned and not reaches_past:
                     continue
 
                 self.owned_function_starts.update(owned)
