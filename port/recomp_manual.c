@@ -2345,12 +2345,14 @@ static void trace_at_step(void)
  * the look) and keeps it here; holding the right stick click passes it
  * through unchanged, for the game's own look. The camera side runs after the
  * camera update (sub_000A5070): it keeps a yaw and a pitch of its own, and
- * puts the eye (+0x44) on the sphere the game's eye is on -- same distance
- * from the target (+0x5C) -- in that direction. The eye is left there, so
- * the game's follow camera carries on from it. A few seconds after the stick
- * is let go, the yaw eases back to the game's and the game has the camera
- * again. Never during a talk (mode 12), while the update is held (+0x1E0),
- * or in the modes JSRF_FREECAM_SKIP lists ("12,5").
+ * puts the eye (+0x44, and the copies the picture is drawn from) on the
+ * sphere the game's eye is on -- same distance from the target (+0x5C) -- in
+ * that direction. The eye is left there, so the game's follow camera carries
+ * on from it. A few seconds after the stick is let go, the yaw eases back
+ * to the game's and the game has the camera again. Never during a talk (mode 12) or in the modes JSRF_FREECAM_SKIP
+ * lists ("12,5"). +0x1E0 is no reason to stay out: the update sets it itself
+ * (0xA5371) and keeps it set while skating; it only skips the smoothing that
+ * follows the mode's update, which runs either way.
  *
  *   JSRF_FREECAM=0           the disc's behaviour
  *   JSRF_FREECAM_SPEED=1.0   turn speed multiplier
@@ -2449,10 +2451,10 @@ static void freecam_step(uint32_t cam)
     static float yaw, pitch;
     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
     float *cf = (float *)(m + cam);
-    uint32_t mode = ((const uint32_t *)cf)[0x208 / 4], held = ((const uint32_t *)cf)[0x1E0 / 4];
+    uint32_t mode = ((const uint32_t *)cf)[0x208 / 4];
     double now = jsrf_now(), dt = now - last;
     float vx, vy, vz, d, r, gyaw, el, el2, rx = s_fc_rx, ry = s_fc_ry;
-    int i, skip = held != 0, stick = rx != 0.0f || ry != 0.0f;
+    int i, skip = 0, stick = rx != 0.0f || ry != 0.0f;
     if (s_fc_on < 0) freecam_init();
     last = now;
     if (!s_fc_on) return;
@@ -2504,6 +2506,21 @@ static void freecam_step(uint32_t cam)
     cf[0x44 / 4] = cf[0x5C / 4] - sinf(yaw) * r * cosf(el2);
     cf[0x48 / 4] = cf[0x60 / 4] + r * sinf(el2);
     cf[0x4C / 4] = cf[0x64 / 4] - cosf(yaw) * r * cosf(el2);
+    /* The picture is not drawn from +0x44. The update keeps the eye three
+     * more times, each beside its own target: +0x50/+0x68 and the follow's
+     * state at +0x1E4/+0x1F0 and +0x20C/+0x218, and the view matrix
+     * (0x1F95FC) is built from those. Moving +0x44 alone orbited a camera
+     * nobody looked through. With all of them moved the follow carries on
+     * from the new direction, and the left stick, which the game reads
+     * against its own camera, turns with it. */
+    { static const uint16_t eyes[][2] = { { 0x50, 0x68 }, { 0x1E4, 0x1F0 }, { 0x20C, 0x218 } };
+      for (i = 0; i < 3; i++) {
+          float *e = cf + eyes[i][0] / 4;
+          const float *t = cf + eyes[i][1] / 4;
+          e[0] = t[0] - sinf(yaw) * r * cosf(el2);
+          e[1] = t[1] + r * sinf(el2);
+          e[2] = t[2] - cosf(yaw) * r * cosf(el2);
+      } }
     s_fc_steer = fc_wrap(yaw - gyaw);
     if (s_fc_log && now >= next_say) {
         next_say = now + 1.0;
