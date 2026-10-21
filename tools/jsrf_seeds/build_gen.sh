@@ -10,6 +10,18 @@ PY=${PYTHON:-python3}
 SEEDS=tools/jsrf_seeds/output/seeds.json
 ANALYSIS="$(dirname "$XBE")/$(basename "$XBE" .xbe)_analysis.json"
 rm -f "$SEEDS"
+# What the last run measured: every indirect call the game made, written as
+# icall_targets.dump into the game folder when it quits. Targets that were
+# not functions yet are seeded too (tools/recomp/icall_feedback.py), and the
+# database keeps them from run to run, so each run lets the next build lift
+# further into the game.
+ICALL_SEEDS=tools/jsrf_seeds/output/icall_seeds.json
+DUMP="$(dirname "$XBE")/icall_targets.dump"
+mkdir -p tools/jsrf_seeds/output
+if [ -f "$DUMP" ]; then
+    $PY -m tools.recomp.icall_feedback merge "$DUMP"
+    $PY -m tools.recomp.icall_feedback seeds --xbe "$XBE" --out "$ICALL_SEEDS"
+fi
 [ -f "$ANALYSIS" ] || $PY -m tools.xbe_parser "$XBE" --json "$ANALYSIS"
 pass=1
 while :; do
@@ -18,6 +30,7 @@ while :; do
     # other libraries' functions too, and the game calls them indirectly.
     set -- --force
     [ -f "$SEEDS" ] && set -- "$@" --seed-functions "$SEEDS"
+    [ -f "$ICALL_SEEDS" ] && set -- "$@" --seed-functions "$ICALL_SEEDS"
     $PY -m tools.disasm "$XBE" "$@"
     $PY -m tools.func_id "$XBE"
     $PY -m tools.abi_analysis "$XBE"
