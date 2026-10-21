@@ -1397,6 +1397,8 @@ static void pad_script_load(void)
         else if (!strcmp(name, "Y")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_Y] = 255;
         else if (!strcmp(name, "LT")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_LTRIGGER] = 255;
         else if (!strcmp(name, "RT")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_RTRIGGER] = 255;
+        else if (!strcmp(name, "LS")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_LEFT_THUMB;
+        else if (!strcmp(name, "RS")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_RIGHT_THUMB;
         s_pad_script_n++;
     }
     fprintf(stderr, "[PAD] script: %d scheduled presses\n", s_pad_script_n);
@@ -2422,32 +2424,11 @@ static void freecam_pad(XBOX_INPUT_STATE *st)
         st->Gamepad.sThumbLY = (int16_t)(ny > 32767 ? 32767 : ny < -32768 ? -32768 : ny);
     }
 }
-/* Once, the first time it takes the camera: where else in guest RAM the
- * view direction is kept -- as three floats in a row or as a column of a
- * 4x4 -- in case the picture is drawn from a copy the eye does not reach. */
-static void freecam_find_view(uint32_t cam, const float *fwd)
-{
-    const uint8_t *m = (const uint8_t *)g_xbox_mem_offset;
-    uint32_t a, n = 0;
-    for (a = 0x10000; a + 48 <= (64u << 20) && n < 24; a += 4) {
-        const float *f = (const float *)(m + a);
-        int row, col;
-        if (!(fabsf(f[0] - fwd[0]) < 2e-3f)) continue;
-        row = fabsf(f[1] - fwd[1]) < 2e-3f && fabsf(f[2] - fwd[2]) < 2e-3f;
-        col = fabsf(f[4] - fwd[1]) < 2e-3f && fabsf(f[8] - fwd[2]) < 2e-3f;
-        if (!row && !col) continue;
-        fprintf(stderr, "[FREECAM] view direction at %08X (%s)", a, row ? "row" : "column");
-        if (a >= cam && a < cam + 0x240u) fprintf(stderr, " = camera +%03X", a - cam);
-        fprintf(stderr, "\n");
-        n++;
-    }
-    fprintf(stderr, "[FREECAM] view direction (%.3f %.3f %.3f): %u places\n", fwd[0], fwd[1], fwd[2], n);
-}
 static void freecam_step(uint32_t cam)
 {
     static double last, idle_since, next_say;
     static uint32_t last_cam, last_mode;
-    static int active, scanned, said;
+    static int active, said;
     static float yaw, pitch;
     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
     float *cf = (float *)(m + cam);
@@ -2473,12 +2454,6 @@ static void freecam_step(uint32_t cam)
         active = 1; yaw = gyaw; pitch = 0; idle_since = now;
         if (said++ < 20)
             fprintf(stderr, "[FREECAM] t=%.1f takes the camera %08X (mode %u)\n", now, cam, mode);
-        if (!scanned) {
-            float r3 = sqrtf(d * d + vy * vy), fwd[3];
-            scanned = 1;
-            fwd[0] = -vx / r3; fwd[1] = -vy / r3; fwd[2] = -vz / r3;
-            freecam_find_view(cam, fwd);
-        }
     }
     if (mode != last_mode && s_fc_log)
         fprintf(stderr, "[FREECAM] t=%.1f mode %u -> %u\n", now, last_mode, mode);
