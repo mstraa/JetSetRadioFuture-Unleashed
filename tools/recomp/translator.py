@@ -352,9 +352,17 @@ class FunctionTranslator:
         for section, strong_starts in by_section.items():
             strong_starts.sort()
             weak_starts = sorted(weak_by_section.get(section, []))
-            for index, start in enumerate(strong_starts[:-1]):
+            # Weak starts get the same look: a tail-jump alias can hold a
+            # switch just as well, and be cut short the same way (JSRF's
+            # sub_00100AB0, table 0x100B90, cut by a bogus start at 0x100AF0).
+            for start in sorted(strong_starts[:-1] + weak_starts):
+                if start in self.owned_function_starts:
+                    continue
+                next_strong = bisect.bisect_right(strong_starts, start)
+                if next_strong >= len(strong_starts):
+                    continue
                 original_end = self.func_db[start].get("end", start)
-                upper = strong_starts[index + 1]
+                upper = strong_starts[next_strong]
                 if original_end >= upper:
                     continue
 
