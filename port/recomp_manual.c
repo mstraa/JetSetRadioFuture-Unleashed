@@ -247,6 +247,10 @@ static void manual_sub_001A308E(void)
     }
     g_esp += 4; return;                      /* ret */
 }
+/* Lifted as a function of its own (tools.jsrf_seeds), it is also reached by
+ * direct calls, which do not go through recomp_lookup_manual(): the same
+ * cooperative wait for those. */
+void sub_001A308E(void) { manual_sub_001A308E(); }
 
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
