@@ -88,12 +88,34 @@ def main():
             seeds[va] = "wrapped"
 
     # 2. direct-call targets left as stubs that sit in a gap
+    #
+    # And those inside a function, when they start one of its instructions:
+    # a tail jump into the middle of another function (a shared epilogue or
+    # body). The stub does nothing, so the jump silently did nothing: JSRF's
+    # sub_000DA710, 9 KB of code in the release, was an empty stub here.
+    # Seeding it cuts the function it is in there; the first
+    # part falls through into it as a tail call, and a jump back across the
+    # cut becomes a stub the next pass seeds in turn.
+    def insn_start(va):
+        i = bisect.bisect_right(rs, va) - 1
+        lo, hi = ranges[i]
+        import capstone
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+        for ins in md.disasm(code_at(lo, hi - lo), lo):
+            if ins.address >= va:
+                return ins.address == va
+        return False
+
     stub = os.path.join(a.gen_dir, "recomp_stubs_unresolved.c")
     if os.path.exists(stub):
         for m in re.finditer(r"/\* 0x([0-9A-Fa-f]{8}):", open(stub).read()):
             va = int(m.group(1), 16)
-            if in_code(va) and va not in known and not in_function(va) and plausible(va):
+            if not in_code(va) or va in known or not plausible(va):
+                continue
+            if not in_function(va):
                 seeds.setdefault(va, "hole")
+            elif insn_start(va):
+                seeds.setdefault(va, "tail")
 
     # 3. pointers into code from the data sections that start nothing yet
     for s in datas:
