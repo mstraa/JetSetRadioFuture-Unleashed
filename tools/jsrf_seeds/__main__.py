@@ -60,7 +60,7 @@ def main():
         return i >= 0 and ranges[i][0] <= va < ranges[i][1]
 
     def code_at(va, n=8):
-        b = xbe.read_bytes_at_va(va, n, ".text")
+        b = xbe.read_bytes_at_va(va, n)
         return b or b""
 
     def plausible(va):
@@ -73,19 +73,33 @@ def main():
 
     seeds = {}
 
-    # 1. what recomp_manual.c wraps as sub_X_gen
+    # 1. what recomp_manual.c wraps as sub_X_gen. Some live in the library
+    # sections after .text (D3D's, ...): those sections are named in
+    # extra_sections.txt for the next pass's --extra-sections.
+    extra_path = os.path.join(os.path.dirname(a.out), "extra_sections.txt")
+    extra = set()
+    if os.path.exists(extra_path):
+        extra = {l.strip() for l in open(extra_path) if l.strip()}
     src = open(a.manual, encoding="utf-8", errors="replace").read()
     for m in re.finditer(r"^extern void sub_([0-9A-Fa-f]{8})_gen\(void\);", src, re.M):
         va = int(m.group(1), 16)
-        if va not in known and t0 <= va < t1:
-            seeds[va] = "wrapped"
+        sec = xbe.find_section(va)
+        if va in known or sec is None:
+            continue
+        seeds[va] = "wrapped"
+        if sec is not text:
+            extra.add(sec.name)
+    code = [text] + [s for s in xbe.sections if s.name in extra and s is not text]
+
+    def in_code(va):
+        return any(s.contains_va(va) for s in code)
 
     # 2. direct-call targets left as stubs that sit in a gap
     stub = os.path.join(a.gen_dir, "recomp_stubs_unresolved.c")
     if os.path.exists(stub):
         for m in re.finditer(r"/\* 0x([0-9A-Fa-f]{8}):", open(stub).read()):
             va = int(m.group(1), 16)
-            if t0 <= va < t1 and va not in known and not in_function(va) and plausible(va):
+            if in_code(va) and va not in known and not in_function(va) and plausible(va):
                 seeds.setdefault(va, "hole")
 
     # 3. pointers into .text from the data sections that start nothing yet
@@ -106,6 +120,9 @@ def main():
     json.dump([{"start": f"0x{v:08X}", "why": seeds.get(v, "earlier pass")} for v in allseeds],
               open(a.out, "w"), indent=1)
 
+    with open(extra_path, "w") as f:
+        f.write("".join(n + "\n" for n in sorted(extra)))
+
     tables = os.path.join(a.gen_dir, "recomp_jsrf_tables.c")
     os.makedirs(a.gen_dir, exist_ok=True)
     with open(tables, "w") as f:
@@ -125,6 +142,8 @@ def main():
         by[seeds[v]] = by.get(seeds[v], 0) + 1
     print(f"jsrf_seeds: {len(new)} new ({', '.join(f'{k} {n}' for k, n in sorted(by.items())) or 'none'}),"
           f" {len(allseeds)} in all -> {a.out}")
+    if extra:
+        print(f"jsrf_seeds: also disassembling {', '.join(sorted(extra))}")
     print(f"NEW={len(new)}")
 
 
