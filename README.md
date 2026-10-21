@@ -229,6 +229,17 @@ knows.
 
 **Controls › Keyboard…** in the menu bar shows the same list.
 
+**Free camera.** The right stick (or the arrow keys) turns the camera around
+the skater while skating, instead of the disc's first-person look that needs
+the skater standing still; the left stick then goes where the camera looks.
+Hold the right stick click (V) to get the original look. A few seconds after
+the stick is let go, the game's own follow camera takes over again. To get
+the disc's behaviour back, or to tune it, on a Mac:
+`defaults write com.jumatt.jsrf-unleashed env -array JSRF_FREECAM=0`
+(also `JSRF_FREECAM_SPEED=1.5`, `JSRF_FREECAM_INVERT=y`,
+`JSRF_FREECAM_HOLD=-1` to never hand back; the list is in
+`port/recomp_manual.c`).
+
 **Video menu:**
 - **Resolution** — the internal resolution, 1× to 4× (2× by default). The
   game restarts to apply it.

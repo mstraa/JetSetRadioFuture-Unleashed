@@ -2328,6 +2328,185 @@ static void trace_at_step(void)
     if (shots[cur] > 0) nv2a_gl_dump_burst(shots[cur], every[cur]);
     cur++;
 }
+/* ---- free camera on the right stick (JSRF_FREECAM, on unless set to 0) ----
+ *
+ * On the disc the right stick is a first-person look: the skater has to be
+ * standing still, and the view leaves the third person to do it. Here the
+ * right stick orbits the follow camera around the skater instead, while
+ * skating, the way most third-person games do. The left stick is camera
+ * relative (auto_step steers through the same eye -> target direction), so
+ * where the camera looks is where "forward" goes.
+ *
+ * The pad side takes the right stick away from the game (so it never enters
+ * the look) and keeps it here; holding the right stick click passes it
+ * through unchanged, for the game's own look. The camera side runs after the
+ * camera update (sub_000A5070): it keeps a yaw and a pitch of its own, and
+ * puts the eye (+0x44) on the sphere the game's eye is on -- same distance
+ * from the target (+0x5C) -- in that direction. The eye is left there, so
+ * the game's follow camera carries on from it. A few seconds after the stick
+ * is let go, the yaw eases back to the game's and the game has the camera
+ * again. Never during a talk (mode 12), while the update is held (+0x1E0),
+ * or in the modes JSRF_FREECAM_SKIP lists ("12,5").
+ *
+ *   JSRF_FREECAM=0           the disc's behaviour
+ *   JSRF_FREECAM_SPEED=1.0   turn speed multiplier
+ *   JSRF_FREECAM_INVERT=x|y|xy
+ *   JSRF_FREECAM_HOLD=3      seconds before handing back; -1 never
+ *   JSRF_FREECAM_STEER=1     also turn the left stick by the camera's offset
+ *                            from the game's (if the game steers from a
+ *                            direction of its own rather than the eye)
+ *   JSRF_FREECAM_LOG=1       [FREECAM] once a second while it has the camera
+ */
+static int s_fc_on = -1, s_fc_steer_on, s_fc_log, s_fc_inv_x, s_fc_inv_y;
+static float s_fc_speed = 1.0f, s_fc_hold = 3.0f;
+static uint32_t s_fc_skip[8] = { 12 };
+static int s_fc_nskip = 1;
+static volatile float s_fc_rx, s_fc_ry;   /* right stick, -1..1, past the dead zone */
+static volatile float s_fc_steer;         /* camera yaw minus the game's, radians */
+static void freecam_init(void)
+{
+    const char *e = getenv("JSRF_FREECAM");
+    s_fc_on = !(e && *e == '0');
+    if ((e = getenv("JSRF_FREECAM_SPEED")) && atof(e) > 0) s_fc_speed = (float)atof(e);
+    if ((e = getenv("JSRF_FREECAM_HOLD"))) s_fc_hold = (float)atof(e);
+    if ((e = getenv("JSRF_FREECAM_INVERT"))) { s_fc_inv_x = strchr(e, 'x') != NULL; s_fc_inv_y = strchr(e, 'y') != NULL; }
+    if ((e = getenv("JSRF_FREECAM_SKIP"))) {
+        s_fc_nskip = 0;
+        while (*e && s_fc_nskip < 8) {
+            char *end; unsigned long v = strtoul(e, &end, 0);
+            if (end == e) break;
+            s_fc_skip[s_fc_nskip++] = (uint32_t)v;
+            e = *end ? end + 1 : end;
+        }
+    }
+    s_fc_steer_on = (e = getenv("JSRF_FREECAM_STEER")) && *e == '1';
+    s_fc_log = getenv("JSRF_FREECAM_LOG") != NULL;
+    fprintf(stderr, "[FREECAM] %s (speed %.2f, hold %.1f s, invert %s%s, steer %d)\n",
+            s_fc_on ? "right stick orbits the camera" : "off: the disc's first-person look",
+            s_fc_speed, s_fc_hold, s_fc_inv_x ? "x" : "", s_fc_inv_y ? "y" : "", s_fc_steer_on);
+}
+static float fc_axis(int16_t v)
+{
+    const float dead = 7849.0f;            /* XInput's right-stick dead zone */
+    float a = (float)v, s = a < 0 ? -1.0f : 1.0f;
+    a = fabsf(a);
+    if (a <= dead) return 0.0f;
+    a = (a - dead) / (32767.0f - dead);
+    return s * (a > 1.0f ? 1.0f : a);
+}
+static float fc_wrap(float a)
+{
+    while (a > 3.14159265f) a -= 2.0f * 3.14159265f;
+    while (a < -3.14159265f) a += 2.0f * 3.14159265f;
+    return a;
+}
+static void freecam_pad(XBOX_INPUT_STATE *st)
+{
+    if (s_fc_on < 0) freecam_init();
+    if (!s_fc_on) return;
+    if (st->Gamepad.wButtons & XBOX_GAMEPAD_RIGHT_THUMB) { s_fc_rx = s_fc_ry = 0; return; }
+    s_fc_rx = fc_axis(st->Gamepad.sThumbRX) * (s_fc_inv_x ? -1.0f : 1.0f);
+    s_fc_ry = fc_axis(st->Gamepad.sThumbRY) * (s_fc_inv_y ? -1.0f : 1.0f);
+    st->Gamepad.sThumbRX = st->Gamepad.sThumbRY = 0;
+    if (s_fc_steer_on && s_fc_steer != 0.0f) {
+        float c = cosf(s_fc_steer), s = sinf(s_fc_steer);
+        float x = st->Gamepad.sThumbLX, y = st->Gamepad.sThumbLY;
+        float nx = x * c + y * s, ny = -x * s + y * c;
+        st->Gamepad.sThumbLX = (int16_t)(nx > 32767 ? 32767 : nx < -32768 ? -32768 : nx);
+        st->Gamepad.sThumbLY = (int16_t)(ny > 32767 ? 32767 : ny < -32768 ? -32768 : ny);
+    }
+}
+/* Once, the first time it takes the camera: where else in guest RAM the
+ * view direction is kept -- as three floats in a row or as a column of a
+ * 4x4 -- in case the picture is drawn from a copy the eye does not reach. */
+static void freecam_find_view(uint32_t cam, const float *fwd)
+{
+    const uint8_t *m = (const uint8_t *)g_xbox_mem_offset;
+    uint32_t a, n = 0;
+    for (a = 0x10000; a + 48 <= (64u << 20) && n < 24; a += 4) {
+        const float *f = (const float *)(m + a);
+        int row, col;
+        if (!(fabsf(f[0] - fwd[0]) < 2e-3f)) continue;
+        row = fabsf(f[1] - fwd[1]) < 2e-3f && fabsf(f[2] - fwd[2]) < 2e-3f;
+        col = fabsf(f[4] - fwd[1]) < 2e-3f && fabsf(f[8] - fwd[2]) < 2e-3f;
+        if (!row && !col) continue;
+        fprintf(stderr, "[FREECAM] view direction at %08X (%s)", a, row ? "row" : "column");
+        if (a >= cam && a < cam + 0x240u) fprintf(stderr, " = camera +%03X", a - cam);
+        fprintf(stderr, "\n");
+        n++;
+    }
+    fprintf(stderr, "[FREECAM] view direction (%.3f %.3f %.3f): %u places\n", fwd[0], fwd[1], fwd[2], n);
+}
+static void freecam_step(uint32_t cam)
+{
+    static double last, idle_since, next_say;
+    static uint32_t last_cam, last_mode;
+    static int active, scanned, said;
+    static float yaw, pitch;
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    float *cf = (float *)(m + cam);
+    uint32_t mode = ((const uint32_t *)cf)[0x208 / 4], held = ((const uint32_t *)cf)[0x1E0 / 4];
+    double now = jsrf_now(), dt = now - last;
+    float vx, vy, vz, d, r, gyaw, el, el2, rx = s_fc_rx, ry = s_fc_ry;
+    int i, skip = held != 0, stick = rx != 0.0f || ry != 0.0f;
+    if (s_fc_on < 0) freecam_init();
+    last = now;
+    if (!s_fc_on) return;
+    if (!(dt > 0) || dt > 0.1) dt = 1.0 / 60;
+    for (i = 0; i < s_fc_nskip; i++) if (mode == s_fc_skip[i]) skip = 1;
+    if (cam != last_cam) active = 0;
+    last_cam = cam;
+    vx = cf[0x44 / 4] - cf[0x5C / 4];
+    vy = cf[0x48 / 4] - cf[0x60 / 4];
+    vz = cf[0x4C / 4] - cf[0x64 / 4];
+    d = sqrtf(vx * vx + vz * vz);
+    if (skip || !(d > 0.05f) || !isfinite(d)) { active = 0; s_fc_steer = 0; return; }
+    gyaw = atan2f(-vx, -vz);              /* look direction (sin yaw, cos yaw) */
+    if (!active) {
+        if (!stick) { s_fc_steer = 0; return; }
+        active = 1; yaw = gyaw; pitch = 0; idle_since = now;
+        if (said++ < 20)
+            fprintf(stderr, "[FREECAM] t=%.1f takes the camera %08X (mode %u)\n", now, cam, mode);
+        if (!scanned) {
+            float r3 = sqrtf(d * d + vy * vy), fwd[3];
+            scanned = 1;
+            fwd[0] = -vx / r3; fwd[1] = -vy / r3; fwd[2] = -vz / r3;
+            freecam_find_view(cam, fwd);
+        }
+    }
+    if (mode != last_mode && s_fc_log)
+        fprintf(stderr, "[FREECAM] t=%.1f mode %u -> %u\n", now, last_mode, mode);
+    last_mode = mode;
+    if (stick) {
+        yaw = fc_wrap(yaw + rx * 2.6f * s_fc_speed * (float)dt);
+        pitch -= ry * 1.5f * s_fc_speed * (float)dt;   /* stick up looks up: the eye goes down */
+        idle_since = now;
+    } else if (s_fc_hold >= 0 && now - idle_since > s_fc_hold) {
+        float k = 1.0f - expf(-3.0f * (float)dt), diff = fc_wrap(gyaw - yaw);
+        yaw = fc_wrap(yaw + diff * k);
+        pitch -= pitch * k;
+        if (fabsf(diff) < 0.01f && fabsf(pitch) < 0.01f) {
+            active = 0; s_fc_steer = 0;
+            if (s_fc_log) fprintf(stderr, "[FREECAM] t=%.1f hands the camera back\n", now);
+            return;
+        }
+    }
+    r = sqrtf(d * d + vy * vy);
+    el = atan2f(vy, d);
+    el2 = el + pitch;
+    if (el2 < -0.30f) el2 = -0.30f;        /* a little under the skater ... */
+    if (el2 > 1.30f) el2 = 1.30f;          /* ... to nearly overhead */
+    pitch = el2 - el;
+    cf[0x44 / 4] = cf[0x5C / 4] - sinf(yaw) * r * cosf(el2);
+    cf[0x48 / 4] = cf[0x60 / 4] + r * sinf(el2);
+    cf[0x4C / 4] = cf[0x64 / 4] - cosf(yaw) * r * cosf(el2);
+    s_fc_steer = fc_wrap(yaw - gyaw);
+    if (s_fc_log && now >= next_say) {
+        next_say = now + 1.0;
+        fprintf(stderr, "[FREECAM] t=%.1f mode %u yaw %.2f (game %.2f) pitch %.2f dist %.1f stick (%.2f %.2f) eye (%.1f %.1f %.1f)\n",
+                now, mode, yaw, gyaw, pitch, r, rx, ry, cf[0x44 / 4], cf[0x48 / 4], cf[0x4C / 4]);
+    }
+}
 static void auto_step(const float *camf, const float *chf)
 {
     static double next_say;
@@ -2376,7 +2555,7 @@ static void auto_step(const float *camf, const float *chf)
     }
 }
 /* Host pad state for a port: real pad if attached, else the script. */
-static int pad_read(uint32_t port, XBOX_INPUT_STATE *st)
+static int pad_read_raw(uint32_t port, XBOX_INPUT_STATE *st)
 {
     static int inited; static uint32_t packet;
     if (!inited) { inited = 1; xbox_InputInit(); pad_script_load(); if (s_auto_n < 0) auto_load(); }
@@ -2438,6 +2617,12 @@ static int pad_read(uint32_t port, XBOX_INPUT_STATE *st)
     }
     if (xbox_InputGetState(port, st) == 0) return 1;
     return port == 0;   /* port 0 always "present", idle, so the title never waits for a pad */
+}
+static int pad_read(uint32_t port, XBOX_INPUT_STATE *st)
+{
+    int ok = pad_read_raw(port, st);
+    if (ok && port == 0) freecam_pad(st);
+    return ok;
 }
 static uint32_t pad_mask(uint32_t type) { return type == XPP_TYPE_GAMEPAD ? 1u : 0u; }
 /* Seed a device-type descriptor the way the console has it by the time a
@@ -4067,6 +4252,8 @@ void sub_000A5070(void)
     sub_000A5070_gen();
     if (cam >= 0x10000u && cam + 0x240u < lim)
         s_cam_mode_now = ((const uint32_t *)(m + cam))[0x208 / 4];
+    if (cam >= 0x10000u && cam + 0x240u < lim)
+        freecam_step(cam);
     { static int hooks = -1;
       if (hooks < 0) hooks = (getenv("JSRF_CANS") || getenv("JSRF_BOOST_DUMP")) ? 1 : 0;
       if (hooks && cam >= 0x10000u && cam + 0x240u < lim) {
