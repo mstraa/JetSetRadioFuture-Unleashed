@@ -1043,7 +1043,7 @@ class Lifter:
             # a call goes to the wrapper, sub_X: calling the body directly
             # skipped JSRF's DirectSound doorbell fix (sub_001A1769) and the
             # audio thread spun for ever.
-            if name == f"sub_{addr:08X}_gen" and addr >= 0x00180000:
+            if name == f"sub_{addr:08X}_gen":
                 name = f"sub_{addr:08X}"
         elif addr in self.label_db:
             name = self.label_db[addr]
