@@ -1074,6 +1074,36 @@ class FunctionTranslator:
         for k, v in _saved.items():
             setattr(self.lifter, k, v)
 
+        # A jcc that starts a block its predecessors reach with flags of
+        # different kinds -- `cmp x, y; jmp L` from one, `test eax, m` falling
+        # into L from the other -- has no single condition to build, and fell
+        # back on the unassigned _flags: never taken. JSRF's sub_000A0F10
+        # (0xA13A1) is that shape, and the skater turned about on every start
+        # from rest, then stood the wrong way round when he stopped. Each
+        # predecessor knows its own flags, so it works the condition out and
+        # leaves it in _flags on the way in.
+        from .lifter import _make_condition
+        by_start = {bb.start: bb for bb in blocks}
+        flags_in = {}                      # pred start -> {target: cond}
+        for bb in blocks:
+            first = bb.instructions[0] if bb.instructions else None
+            if (first is None or not first.is_cond_jump
+                    or first.mnemonic in ("jecxz", "jcxz")
+                    or entry_state.get(bb.start) is not None
+                    or bb.start == start or not preds[bb.start]):
+                continue
+            conds = {}
+            for p in preds[bb.start]:
+                st = block_out.get(p)
+                c = _make_condition(first.mnemonic, *st) if st and st[0] else None
+                if not c:
+                    conds = None
+                    break
+                conds[p] = c[0]
+            if conds:
+                for p, c in conds.items():
+                    flags_in.setdefault(p, {})[bb.start] = c
+
         out_state = {}
         for bb in blocks:
             # Emit label if this block is a branch target
@@ -1092,6 +1122,20 @@ class FunctionTranslator:
 
             stmts, out_state[bb.start] = lift_basic_block(
                 self.lifter, bb, flag_state=incoming)
+            for tgt, cond in flags_in.get(bb.start, {}).items():
+                go = f"goto loc_{tgt:08X};"
+                last = bb.instructions[-1]
+                if stmts and go in stmts[-1] and last.jump_target == tgt:
+                    if last.is_cond_jump:
+                        stmts[-1] = stmts[-1].replace(
+                            go, f"{{ _flags = ({cond}); {go} }}")
+                    else:
+                        stmts.insert(len(stmts) - 1, f"_flags = ({cond}); /* for the jcc at 0x{tgt:08X} */")
+                    if last.is_cond_jump and blocks.index(bb) + 1 < len(blocks) \
+                            and blocks[blocks.index(bb) + 1].start == tgt:
+                        stmts.append(f"_flags = ({cond}); /* falls into the jcc at 0x{tgt:08X} */")
+                elif not (last.is_ret or last.mnemonic in ("jmp", "int3", "ud2", "hlt")):
+                    stmts.append(f"_flags = ({cond}); /* falls into the jcc at 0x{tgt:08X} */")
             for stmt in stmts:
                 lines.append(f"    {stmt}")
 
