@@ -2374,7 +2374,9 @@ static volatile float s_fc_steer;         /* camera yaw minus the game's, radian
 static void freecam_init(void)
 {
     const char *e = getenv("JSRF_FREECAM");
-    s_fc_on = !(e && *e == '0');
+    extern int nv_window_pref_freecam(void) __attribute__((weak));
+    /* Controls > Free Camera in the Mac's menu when the variable is not set. */
+    s_fc_on = (e && *e) ? *e != '0' : (nv_window_pref_freecam ? nv_window_pref_freecam() : 1);
     if ((e = getenv("JSRF_FREECAM_SPEED")) && atof(e) > 0) s_fc_speed = (float)atof(e);
     if ((e = getenv("JSRF_FREECAM_HOLD"))) s_fc_hold = (float)atof(e);
     if ((e = getenv("JSRF_FREECAM_INVERT"))) { s_fc_inv_x = strchr(e, 'x') != NULL; s_fc_inv_y = strchr(e, 'y') != NULL; }
@@ -2392,6 +2394,15 @@ static void freecam_init(void)
     fprintf(stderr, "[FREECAM] %s (speed %.2f, hold %.1f s, invert %s%s, steer %d)\n",
             s_fc_on ? "right stick orbits the camera" : "off: the disc's first-person look",
             s_fc_speed, s_fc_hold, s_fc_inv_x ? "x" : "", s_fc_inv_y ? "y" : "", s_fc_steer_on);
+}
+/* The menu's switch (nv2a_window_mac.m): off hands the right stick back to
+ * the game at once. */
+int jsrf_freecam_enabled(void) { if (s_fc_on < 0) freecam_init(); return s_fc_on; }
+void jsrf_set_freecam(int on)
+{
+    if (s_fc_on < 0) freecam_init();
+    s_fc_on = on ? 1 : 0;
+    if (!on) s_fc_rx = s_fc_ry = 0;
 }
 static float fc_axis(int16_t v)
 {

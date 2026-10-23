@@ -48,6 +48,11 @@ static uint64_t ca_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+/* Audio > Mute (nv2a_window_mac.m): the ring is still drained at the
+ * device's pace, so the APU's timing is the same; only the speakers get
+ * silence. */
+volatile int g_audio_user_mute;
+
 /* One device pull: CA_BUF_FRAMES frames out of the ring, silence for any
  * the ring does not have. */
 static void ca_pull(int16_t (*out)[CA_CHANNELS])
@@ -66,6 +71,7 @@ static void ca_pull(int16_t (*out)[CA_CHANNELS])
         atomic_fetch_add_explicit(&g_underruns, 1, memory_order_relaxed);
     }
     atomic_store_explicit(&g_rd, rd + n, memory_order_release);
+    if (g_audio_user_mute) memset(out, 0, want * sizeof g_ring[0]);
 }
 
 static void ca_callback(void *user, AudioQueueRef q, AudioQueueBufferRef buf)

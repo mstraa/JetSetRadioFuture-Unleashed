@@ -485,6 +485,33 @@ int nv_window_pref_widescreen(void)
     }
 }
 
+/* Video > HUD at the Screen Edges, Controls > Free Camera and Audio > Mute,
+ * stored as the "hudEdges", "freeCamera" and "mute" defaults; each applied at
+ * once. RECOMP_HUD_EDGES and JSRF_FREECAM in the environment win. */
+int nv_window_pref_hud_edges(void);
+int nv_window_pref_hud_edges(void)
+{
+    @autoreleasepool {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        return ([d objectForKey:@"hudEdges"] == nil || [d boolForKey:@"hudEdges"]) ? 1 : 0;
+    }
+}
+int nv_window_pref_freecam(void);
+int nv_window_pref_freecam(void)
+{
+    @autoreleasepool {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        return ([d objectForKey:@"freeCamera"] == nil || [d boolForKey:@"freeCamera"]) ? 1 : 0;
+    }
+}
+static int nv_window_pref_mute(void)
+{
+    @autoreleasepool {
+        return [[NSUserDefaults standardUserDefaults] boolForKey:@"mute"] ? 1 : 0;
+    }
+}
+extern volatile int g_audio_user_mute __attribute__((weak));
+
 /* Video > Renderer: Metal or OpenGL, stored as the "renderer" default
  * ("metal" / "opengl") and read once, when the renderer starts -- it cannot
  * change under a running frame. RECOMP_BACKEND in the environment wins
@@ -532,6 +559,9 @@ static void nv_window_shape_for_mode(void)
 - (void)pickScale:(id)sender;
 - (void)pickRenderer:(id)sender;
 - (void)toggleWidescreen:(id)sender;
+- (void)toggleHudEdges:(id)sender;
+- (void)toggleFreeCamera:(id)sender;
+- (void)toggleMute:(id)sender;
 - (void)showKeys:(id)sender;
 - (void)showPad:(id)sender;
 @end
@@ -597,6 +627,36 @@ static void nv_window_shape_for_mode(void)
     [(NSMenuItem *)sender setState:on ? NSControlStateValueOn : NSControlStateValueOff];
     nv_window_shape_for_mode();
     fprintf(stderr, "[WIN] widescreen %s\n", on ? "on (16:9)" : "off (4:3)");
+}
+- (void)toggleHudEdges:(id)sender
+{
+    extern int nv2a_hud_edges(void);
+    extern void nv2a_set_hud_edges(int on);
+    int on = !nv2a_hud_edges();
+    nv2a_set_hud_edges(on);
+    [[NSUserDefaults standardUserDefaults] setBool:(on ? YES : NO) forKey:@"hudEdges"];
+    [(NSMenuItem *)sender setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+    fprintf(stderr, "[WIN] HUD %s\n", on ? "at the screen edges" : "in the middle 4:3");
+}
+- (void)toggleFreeCamera:(id)sender
+{
+    extern int  jsrf_freecam_enabled(void) __attribute__((weak));
+    extern void jsrf_set_freecam(int on) __attribute__((weak));
+    int on = jsrf_freecam_enabled ? !jsrf_freecam_enabled() : !nv_window_pref_freecam();
+    if (jsrf_set_freecam) jsrf_set_freecam(on);
+    [[NSUserDefaults standardUserDefaults] setBool:(on ? YES : NO) forKey:@"freeCamera"];
+    [(NSMenuItem *)sender setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+    fprintf(stderr, "[WIN] free camera %s\n", on ? "on" : "off");
+}
+- (void)toggleMute:(id)sender
+{
+    int on;
+    if (!&g_audio_user_mute) return;
+    on = !g_audio_user_mute;
+    g_audio_user_mute = on;
+    [[NSUserDefaults standardUserDefaults] setBool:(on ? YES : NO) forKey:@"mute"];
+    [(NSMenuItem *)sender setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+    fprintf(stderr, "[WIN] sound %s\n", on ? "muted" : "on");
 }
 - (void)showPad:(id)sender
 {
@@ -774,6 +834,17 @@ static void build_menu(void)
         [ws setState:nv2a_widescreen() ? NSControlStateValueOn : NSControlStateValueOff];
         [video addItem:ws];
     }
+    {
+        /* Only does anything in widescreen: the 4:3 frame has no edges to
+         * move the HUD out to. */
+        extern int nv2a_hud_edges(void);
+        NSMenuItem *he = [[NSMenuItem alloc] initWithTitle:@"HUD at the Screen Edges"
+                                                   action:@selector(toggleHudEdges:)
+                                            keyEquivalent:@""];
+        [he setTarget:g_menu_target];
+        [he setState:nv2a_hud_edges() ? NSControlStateValueOn : NSControlStateValueOff];
+        [video addItem:he];
+    }
     [videoItem setSubmenu:video];
     [bar addItem:videoItem];
 
@@ -792,8 +863,35 @@ static void build_menu(void)
             [pad setTarget:g_menu_target];
             [ctl addItem:pad];
         }
+        {
+            extern int jsrf_freecam_enabled(void) __attribute__((weak));
+            NSMenuItem *fc = [[NSMenuItem alloc] initWithTitle:@"Free Camera (Right Stick)"
+                                                       action:@selector(toggleFreeCamera:)
+                                                keyEquivalent:@""];
+            int on = jsrf_freecam_enabled ? jsrf_freecam_enabled() : nv_window_pref_freecam();
+            [fc setTarget:g_menu_target];
+            [fc setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+            [ctl addItem:[NSMenuItem separatorItem]];
+            [ctl addItem:fc];
+        }
         [ctlItem setSubmenu:ctl];
         [bar addItem:ctlItem];
+    }
+    {
+        NSMenuItem *audItem = [[NSMenuItem alloc] init];
+        NSMenu *aud = [[NSMenu alloc] initWithTitle:@"Audio"];
+        NSMenuItem *mu = [[NSMenuItem alloc] initWithTitle:@"Mute"
+                                                   action:@selector(toggleMute:)
+                                            keyEquivalent:@"m"];
+        [mu setKeyEquivalentModifierMask:(NSEventModifierFlagCommand |
+                                          NSEventModifierFlagShift)];
+        if (&g_audio_user_mute) g_audio_user_mute = nv_window_pref_mute();
+        [mu setTarget:g_menu_target];
+        [mu setState:(&g_audio_user_mute && g_audio_user_mute) ? NSControlStateValueOn
+                                                                : NSControlStateValueOff];
+        [aud addItem:mu];
+        [audItem setSubmenu:aud];
+        [bar addItem:audItem];
     }
 
     [NSApp setMainMenu:bar];

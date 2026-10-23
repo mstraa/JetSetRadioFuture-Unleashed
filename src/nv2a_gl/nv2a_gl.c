@@ -3633,6 +3633,38 @@ void nv2a_set_wide_aspect(float a)
 float nv2a_wide_aspect(void) { return g_wide_aspect; }
 float nv2a_wide_squeeze(void) { return g_wide_s; }
 static int g_wide_squeeze;   /* this draw's 2D squeeze, set in do_draw */
+static float g_wide_anchor;  /* ...and its move to a screen edge, NDC, ditto */
+static int g_ff_hud;         /* a fixed-function overlay moved to an edge, ditto */
+/* Video > HUD at the Screen Edges: a squeezed overlay on one side of the
+ * 4:3 frame -- the health bar, the spray can, the counters -- is moved out
+ * by (1 - s), so the 4:3 frame's edge lands on the 16:9 screen's instead of
+ * the middle 4:3's (see hud_anchor). Anything near the centre (trick names,
+ * menus, text boxes) stays where the squeeze put it. RECOMP_HUD_EDGES=1/0
+ * overrides the menu's choice. */
+static int g_hud_edges = -1;
+int nv2a_hud_edges(void)
+{
+    if (g_hud_edges < 0) {
+        const char *v = getenv("RECOMP_HUD_EDGES");
+        extern int nv_window_pref_hud_edges(void) __attribute__((weak));
+        if (v && *v) g_hud_edges = atoi(v) != 0;
+        else g_hud_edges = nv_window_pref_hud_edges ? (nv_window_pref_hud_edges() != 0) : 0;
+    }
+    return g_hud_edges;
+}
+void nv2a_set_hud_edges(int on) { g_hud_edges = on ? 1 : 0; }
+/* Which edge an overlay spanning lo..hi (4:3 NDC) goes to: the side its
+ * middle is on, once that is well off centre. JSRF draws its whole top-right
+ * HUD -- bar, counters -- as one draw from 0.23 to 0.84. Something wide
+ * (a text box, a menu) stays where it is. */
+static float hud_anchor(float lo, float hi)
+{
+    float c = 0.5f * (lo + hi);
+    if (hi - lo > 1.2f) return 0.0f;
+    if (c >  0.3f) return  (1.0f - g_wide_s);
+    if (c < -0.3f) return -(1.0f - g_wide_s);
+    return 0.0f;
+}
 static float g_wide_shift;   /* this draw's framed-3D move, title pixels, ditto */
 static Nv2aRenderState g_draw_rs;   /* the state this draw was given */
 static float g_wide_ext[4];  /* its x and y extent, for the draw log */
@@ -4670,6 +4702,7 @@ static void do_draw_body(void)
     }
 
     g_wide_squeeze = 0;
+    g_wide_anchor = 0.0f;
     memset(g_wide_ext, 0, sizeof g_wide_ext);
     if (nv2a_wide_scene() && S.xf_mode != NV2A_XF_MODE_FIXED
         && g_pcache[slot].inputs == 0x1F9B && attr_at[0] >= 0
@@ -4686,15 +4719,29 @@ static void do_draw_body(void)
         /* In NDC, through the viewport the epilogue divides by: D3D's own
          * copy of the scene to the display works in the surface's scaled
          * pixels (0..2560 at 4x), the title's overlays in 640x480 ones. */
+        float vis_lo = 1e30f, vis_hi = -1e30f;
         { float sx = fabsf(S.u.vp_scale[0]) > 1e-6f ? fabsf(S.u.vp_scale[0]) : 320.0f;
           float sy = fabsf(S.u.vp_scale[1]) > 1e-6f ? fabsf(S.u.vp_scale[1]) : 240.0f;
           lo = (lo - S.u.vp_off[0]) / sx; hi = (hi - S.u.vp_off[0]) / sx;
-          ylo = (ylo - S.u.vp_off[1]) / sy; yhi = (yhi - S.u.vp_off[1]) / sy; }
+          ylo = (ylo - S.u.vp_off[1]) / sy; yhi = (yhi - S.u.vp_off[1]) / sy;
+          /* ...and the part of it on screen, for the HUD's side: the title
+           * parks overlays just past the 4:3 edges in the same draw as the
+           * ones it shows. */
+          if (nv2a_hud_edges())
+              for (k3 = 0; k3 < out_n; k3++) {
+                  float x = (vbuf[(size_t)k3 * stride_floats + (uint32_t)attr_at[0]]
+                             - S.u.vp_off[0]) / sx;
+                  if (x < -1.0f || x > 1.0f) continue;
+                  if (x < vis_lo) vis_lo = x;
+                  if (x > vis_hi) vis_hi = x;
+              } }
         g_wide_ext[0] = lo; g_wide_ext[1] = hi; g_wide_ext[2] = ylo; g_wide_ext[3] = yhi;
         /* Spanning (nearly) the whole width or the whole height: a backdrop,
          * a fade, a frame -- left to fill the 16:9 screen. Anything smaller
          * is an overlay and keeps its shape. */
         if (hi - lo < 1.8f && yhi - ylo < 1.8f) g_wide_squeeze = 1;
+        if (g_wide_squeeze && nv2a_hud_edges() && vis_lo <= vis_hi)
+            g_wide_anchor = hud_anchor(vis_lo, vis_hi);
         /* RECOMP_WIDE_NOSQUEEZE=1 (test only): measure, never squeeze. */
         { static int nosq = -1;
           if (nosq < 0) nosq = getenv("RECOMP_WIDE_NOSQUEEZE") ? 1 : 0;
@@ -4723,8 +4770,52 @@ static void do_draw_body(void)
         uint32_t x1 = (S.wclip_h[0] >> 16) & 0xFFFu;
         uint32_t y0 =  S.wclip_v[0]        & 0xFFFu;
         uint32_t y1 = (S.wclip_v[0] >> 16) & 0xFFFu;
-        if (x1 > x0 && y1 > y0 && x1 - x0 + 1 < 600u)
+        if (x1 > x0 && y1 > y0 && x1 - x0 + 1 < 600u) {
             g_wide_shift = (1.0f - g_wide_s) * (0.5f * (float)(x0 + x1 + 1) - 320.0f);
+            /* HUD at the edges: a window on one side goes out with the
+             * overlays around it (JSRF's spinning spray can is one). The
+             * same test as theirs, on the window's rectangle. */
+            if (nv2a_hud_edges()) {
+                g_wide_anchor = hud_anchor((float)x0 / 320.0f - 1.0f,
+                                           (float)(x1 + 1) / 320.0f - 1.0f);
+                g_wide_shift -= g_wide_anchor * 320.0f;
+            }
+        }
+    }
+
+    /*
+     * HUD at the edges, for overlays drawn through the fixed-function
+     * pipeline straight to screen pixels at one depth (so with one w for
+     * every vertex, however the matrix gets it) -- JSRF's spray can.
+     * Nothing squeezes those (the camera widening leaves orthographic
+     * projections alone and the 2D squeeze above is for the pass-through
+     * program), so one on a side is squeezed and moved out here, in its
+     * matrix (see the FFMAT upload).
+     */
+    g_ff_hud = 0;
+    if (nv2a_wide_scene() && nv2a_hud_edges() && S.xf_mode == NV2A_XF_MODE_FIXED
+        && S.clip_w == 640 && S.clip_h == 480 && !vc_vb && attr_at[0] >= 0 && out_n
+        && g_fbo_w) {
+        float xl = 1e30f, xh = -1e30f, yl = 1e30f, yh = -1e30f, c = 0.5f * (float)g_fbo_w;
+        float w0 = 0.0f;
+        int flat = 1;
+        uint32_t q;
+        for (q = 0; q < out_n && flat; q++) {
+            const float *v = &vbuf[(size_t)q * stride_floats + (uint32_t)attr_at[0]];
+            float x = v[0]*S.u.ff_mat[0][0] + v[1]*S.u.ff_mat[0][1] + v[2]*S.u.ff_mat[0][2] + v[3]*S.u.ff_mat[0][3];
+            float y = v[0]*S.u.ff_mat[1][0] + v[1]*S.u.ff_mat[1][1] + v[2]*S.u.ff_mat[1][2] + v[3]*S.u.ff_mat[1][3];
+            float w = v[0]*S.u.ff_mat[3][0] + v[1]*S.u.ff_mat[3][1] + v[2]*S.u.ff_mat[3][2] + v[3]*S.u.ff_mat[3][3];
+            if (!q) w0 = w;
+            if (!(w0 > 1e-6f) || fabsf(w - w0) > 1e-4f * w0) { flat = 0; break; }
+            x /= w; y /= w;
+            if (x < xl) xl = x; if (x > xh) xh = x;
+            if (y < yl) yl = y; if (y > yh) yh = y;
+        }
+        if (flat && xh - xl < 0.9f * (float)g_fbo_w && yh - yl < 0.9f * (float)g_fbo_h
+            && xl >= 0.0f && xh <= (float)g_fbo_w) {
+            float a = hud_anchor(xl / c - 1.0f, xh / c - 1.0f);
+            if (a != 0.0f) { g_ff_hud = 1; g_wide_anchor = a; }
+        }
     }
 
     /* The vertices, where each attribute sits in them, and the value of
@@ -5069,6 +5160,15 @@ static void do_draw_body(void)
         uni1f(NV2A_U_LTSPECPOW, 16.0f);
     }
     if (uses(slot, NV2A_U_FFMAT)) {
+        if (g_ff_hud) {
+            /* x' = c + s (x - c) + a c, in the matrix's screen pixels. */
+            float m[4][4], c = 0.5f * (float)g_fbo_w;
+            float t = c * (1.0f - g_wide_s) + g_wide_anchor * c;
+            int k;
+            memcpy(m, S.u.ff_mat, sizeof m);
+            for (k = 0; k < 4; k++) m[0][k] = g_wide_s * m[0][k] + t * m[3][k];
+            G->uniform_f(NV2A_U_FFMAT, &m[0][0], 4);
+        } else
         G->uniform_f(NV2A_U_FFMAT, &S.u.ff_mat[0][0], 4);
         if (uses(slot, NV2A_U_FFVPOFF))
             G->uniform_f(NV2A_U_FFVPOFF, S.vp_off_reg, 1);
@@ -5136,8 +5236,12 @@ static void do_draw_body(void)
     float vp_scale_eff[4];
     memcpy(vp_scale_eff, S.u.vp_scale, sizeof vp_scale_eff);
     if (g_wide_squeeze) vp_scale_eff[0] *= 1.0f / g_wide_s;
+    /* ...and HUD at the edges: ndc.x + a is (x - (off - a * scale)) / scale. */
+    float vp_off_eff[4];
+    memcpy(vp_off_eff, S.u.vp_off, sizeof vp_off_eff);
+    if (g_wide_squeeze && g_wide_anchor != 0.0f) vp_off_eff[0] -= g_wide_anchor * vp_scale_eff[0];
     if (memcmp(g_last.vp_scale, vp_scale_eff, sizeof vp_scale_eff)
-     || memcmp(g_last.vp_off, S.u.vp_off, sizeof S.u.vp_off)
+     || memcmp(g_last.vp_off, vp_off_eff, sizeof vp_off_eff)
      || g_last.wide_shift != g_wide_shift) {
         /* The viewport, whenever it changes.
          *
@@ -5157,7 +5261,7 @@ static void do_draw_body(void)
                     S.xf_mode);
         }
         G->uniform_f(NV2A_U_VPSCALE, vp_scale_eff, 1);
-        G->uniform_f(NV2A_U_VPOFF, S.u.vp_off, 1);
+        G->uniform_f(NV2A_U_VPOFF, vp_off_eff, 1);
         uni2f(NV2A_U_VPSURFACE, (float)g_fbo_w, (float)g_fbo_h);
         {   /* Where the viewport is on the surface, for a vertex program's
              * screen-space oPos (see the epilogue): its centre -- the offset
@@ -5178,7 +5282,7 @@ static void do_draw_body(void)
         }
         uni1f(NV2A_U_WIDESHIFT, g_wide_shift);
         memcpy(g_last.vp_scale, vp_scale_eff, sizeof vp_scale_eff);
-        memcpy(g_last.vp_off, S.u.vp_off, sizeof S.u.vp_off);
+        memcpy(g_last.vp_off, vp_off_eff, sizeof vp_off_eff);
         g_last.wide_shift = g_wide_shift;
     }
 
@@ -5462,6 +5566,9 @@ static void do_draw_body(void)
           if (g_wide_squeeze || g_wide_shift != 0.0f) {
               float c = 0.5f * (float)g_fbo_w;
               float a = c + g_wide_s * ((float)cx0 - c), b = c + g_wide_s * ((float)cx1 - c);
+              /* ...and one moved out to a screen edge, with it. */
+              a += g_wide_anchor * c; b += g_wide_anchor * c;
+              if (b > (float)g_fbo_w) b = (float)g_fbo_w;
               cx0 = a > 0.0f ? (uint32_t)floorf(a) : 0u;
               cx1 = b > 0.0f ? (uint32_t)ceilf(b) : 0u;
               clip = 1;
