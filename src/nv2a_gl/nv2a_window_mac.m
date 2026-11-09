@@ -605,6 +605,15 @@ static void nv_window_shape_for_mode(void)
  * and the skater keeps his heading. Asked every frame, so a change applies at
  * once. RECOMP_RSTICK_CAMERA in the environment wins there. */
 static volatile int g_rstick_cam = -1;
+/* Audio > Mute, stored as the "mute" default and applied at once. */
+static int nv_window_pref_mute(void)
+{
+    @autoreleasepool {
+        return [[NSUserDefaults standardUserDefaults] boolForKey:@"mute"] ? 1 : 0;
+    }
+}
+extern volatile int g_audio_user_mute __attribute__((weak));
+
 int nv_window_pref_rstick_camera(void);
 int nv_window_pref_rstick_camera(void)
 {
@@ -716,6 +725,7 @@ void nv_window_photo_help(const char *text)
 - (void)photoMode:(id)sender;
 - (void)toggleVibration:(id)sender;
 - (void)pickMap:(id)sender;
+- (void)toggleMute:(id)sender;
 - (void)showKeys:(id)sender;
 - (void)showPad:(id)sender;
 @end
@@ -858,6 +868,18 @@ void nv_window_photo_help(const char *text)
 {
     g_map_request = (int)[sender tag];
 }
+/* Audio > Mute: on and off, remembered. */
+- (void)toggleMute:(id)sender
+{
+    int on;
+    if (!&g_audio_user_mute) return;
+    on = !g_audio_user_mute;
+    g_audio_user_mute = on;
+    [[NSUserDefaults standardUserDefaults] setBool:(on ? YES : NO) forKey:@"mute"];
+    [(NSMenuItem *)sender setState:on ? NSControlStateValueOn : NSControlStateValueOff];
+    fprintf(stderr, "[WIN] sound %s\n", on ? "muted" : "on");
+}
+
 /* Controls > Vibration: on and off, remembered. */
 - (void)toggleVibration:(id)sender
 {
@@ -1202,6 +1224,22 @@ static void build_menu(void)
         }
         [mapsItem setSubmenu:maps];
         [bar addItem:mapsItem];
+    }
+    {
+        NSMenuItem *audItem = [[NSMenuItem alloc] init];
+        NSMenu *aud = [[NSMenu alloc] initWithTitle:@"Audio"];
+        NSMenuItem *mu = [[NSMenuItem alloc] initWithTitle:@"Mute"
+                                                   action:@selector(toggleMute:)
+                                            keyEquivalent:@"m"];
+        [mu setKeyEquivalentModifierMask:(NSEventModifierFlagCommand |
+                                          NSEventModifierFlagShift)];
+        if (&g_audio_user_mute) g_audio_user_mute = nv_window_pref_mute();
+        [mu setTarget:g_menu_target];
+        [mu setState:(&g_audio_user_mute && g_audio_user_mute) ? NSControlStateValueOn
+                                                                : NSControlStateValueOff];
+        [aud addItem:mu];
+        [audItem setSubmenu:aud];
+        [bar addItem:audItem];
     }
 
     [NSApp setMainMenu:bar];

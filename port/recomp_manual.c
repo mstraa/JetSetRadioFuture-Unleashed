@@ -1466,6 +1466,8 @@ static void pad_script_load(void)
         else if (!strcmp(name, "DOWN")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_DPAD_DOWN;
         else if (!strcmp(name, "LEFT")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_DPAD_LEFT;
         else if (!strcmp(name, "RIGHT")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_DPAD_RIGHT;
+        else if (!strcmp(name, "LS")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_LEFT_THUMB;
+        else if (!strcmp(name, "RS")) s_pad_script[s_pad_script_n].buttons = XBOX_GAMEPAD_RIGHT_THUMB;
         else if (!strcmp(name, "A")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_A] = 255;
         else if (!strcmp(name, "B")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_B] = 255;
         else if (!strcmp(name, "X")) s_pad_script[s_pad_script_n].analog[XBOX_BUTTON_X] = 255;
